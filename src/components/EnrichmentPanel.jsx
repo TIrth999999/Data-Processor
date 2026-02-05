@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { Download, Plus, Upload, Save, Trash2, Database, ArrowLeft, Calendar, FileSpreadsheet, FileText, LogOut } from 'lucide-react';
-import Papa from 'papaparse';
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType, HeadingLevel, BorderStyle } from 'docx';
 import { saveAs } from 'file-saver';
+import { clsx } from 'clsx';
+import { parseFile, isSupportedFileFormat } from '../utils/fileParser';
 
 const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -110,23 +111,68 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         }
     };
 
-    // Filter keys for display: exclude internal ones
-    // Collect ALL keys from ALL rows to ensure we show columns even if the first row doesn't have them
+    // Filter keys for display
     const allKeys = new Set();
     data.forEach(row => {
         Object.keys(row).forEach(k => {
-            if (k && k.trim() !== '' && !k.startsWith('__')) allKeys.add(k); // Ignore empty/internal keys
+            if (k && k.trim() !== '' && !k.startsWith('__')) allKeys.add(k);
         });
     });
 
-    // Base keys (excluding attendance specific ones for now)
-    const baseKeys = Array.from(allKeys).filter(k =>
-        !['id', 'internalStatus', 'statusColor', 'originalRow'].includes(k) &&
-        !months.some(m => k.startsWith(m + ' ')) // Hide "Jan Total", "Feb %" etc from base list
-    ).sort();
+    // --- Column Configuration & Mapping ---
+    const RENAMED_HEADERS = {
+        "Photo (Proper Scanned Image- Max size up to 200 kb)": "Photo",
+        "Retype Bank Account Number": "Account No.",
+        "Self Attested scanned copy of Aadhaar Card. (PDF/Image - File Size up to 500 KB)": "Aadhar Card",
+        "Self Attested scanned copy of Bank Passbook / Cheque Book / Bank Statement. ( PDF/Image - File Size up to 500 KB)": "PassBook",
+        "Signature (Proper Scanned Image- Max size up to 100 kb)": "Signature",
+        "Username": "Email",
+        "Roll Number": "Roll No.",
+        "Birth Place": "Domicile",
+        "Birth Place_1": "Birth Place",
+        "Sub Caste (as mentioned in SEBC/SC/ST caste certificate)": "Sub Caste",
+        "Student Name (Same As per Bank Records)": "Student Name (Bank)", 
+    };
 
-    // Now construct the final display columns: Base Columns + Selected Month Columns
-    // We strictly define the 4 attendance columns for the selected month
+    const isHidden = (key) => {
+        const lower = key.toLowerCase();
+        return lower.includes('timestamp') || (lower.includes('term') && lower.length > 50) || lower === 't&c';
+    };
+
+    const getDisplayName = (key) => {
+        // Attendance Columns
+        if (key.includes('Total') || key.includes('Attended') || key.includes('%') || key.includes('Stipend')) {
+             if (key.includes('Total')) return 'Total Days'; // Month will be added in subtitle
+             if (key.includes('Attended')) return 'Attended';
+             if (key.includes('%')) return '%';
+             if (key.includes('Stipend')) return 'Stipend';
+        }
+        
+        return RENAMED_HEADERS[key] || key;
+    };
+
+    // --- Helper to find keys by patterns --- 
+    const findLike = (term) => Array.from(allKeys).find(k => k.toLowerCase().includes(term.toLowerCase()));
+    
+    // Explicit Ordering Keys
+    const rollKey = Array.from(allKeys).find(k => k === 'Roll Number') || findLike('Roll No');
+    const nameFullKey = findLike('Name of Student (Full Name)') || findLike('Full Name') || findLike('Student Name (Full Name)');
+    const nameAadharKey = findLike('Student Name (Same As per aadhar'); 
+    const nameBankKey = findLike('Student Name (Same As per Bank');
+    const categoryKey = findLike('Category') || findLike('Caste');
+    const subCasteKey = findLike('Sub Caste') || findLike('Subcast'); 
+    
+    // Define the specific sequence
+    const priorityKeys = [
+        rollKey, 
+        nameFullKey,
+        nameAadharKey, 
+        nameBankKey, 
+        categoryKey, 
+        subCasteKey
+    ].filter(Boolean);
+
+    // Attendance Keys for Selected Month
     const attendanceKeys = [
         `${selectedMonth} Total`,
         `${selectedMonth} Attended`,
@@ -134,15 +180,15 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         `${selectedMonth} Stipend`
     ];
 
+    // Other keys: everything else not hidden, not priority, not attendance
+    const otherKeys = Array.from(allKeys).filter(k => 
+        !priorityKeys.includes(k) && 
+        !isHidden(k) &&    
+        !['id', 'internalStatus', 'statusColor', 'originalRow'].includes(k) &&
+        !months.some(m => k.startsWith(m + ' ')) // Filter out OTHER months' data if present in row
+    ).sort(); // Sort others alphabetically or keep original? Sort is safer for consistency.
 
-    // Prioritize column order: Roll Number, Name, Attendance (selected month), then others
-    const rollNumberKey = baseKeys.find(k => k.toLowerCase().includes('roll'));
-    const nameKey = baseKeys.find(k => k.toLowerCase().includes('name') && !k.toLowerCase().includes('username'));
-
-    const priorityKeys = [rollNumberKey, nameKey].filter(Boolean);
-    const otherKeys = baseKeys.filter(k => !priorityKeys.includes(k));
-
-    // Final order: Roll Number, Name, Attendance (month), Other fields
+    // Final Display Order
     const displayKeys = [...priorityKeys, ...attendanceKeys, ...otherKeys];
 
     // Helper to check if a value is a URL
@@ -222,90 +268,93 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         return Object.keys(obj).find(k => k.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedTarget);
     };
 
-    const handleAttendanceCSV = (e) => {
+    const handleAttendanceCSV = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
 
-        Papa.parse(file, {
-            header: true,
-            skipEmptyLines: 'greedy',
-            transformHeader: (h, i) => {
-                const clean = h ? h.trim() : '';
-                // Handle duplicate or empty headers by appending index
-                return clean || `__empty_${i}`;
-            },
-            complete: (results) => {
-                const attendedMap = new Map();
-                let matchCount = 0;
+        // Check if file format is supported
+        if (!isSupportedFileFormat(file)) {
+            alert('Please upload a valid file (CSV, XLSX, or XLS)');
+            return;
+        }
 
-                results.data.forEach(row => {
-                    // Try getting Roll Number with various loose matches from the CSV row
-                    // We look for 'rollnumber', 'rollno', 'rollid' etc.
-                    const rollKey = findKey(row, 'rollnumber') || findKey(row, 'rollno') || findKey(row, 'rollid') || findKey(row, 'rollnoasperattendancemuster');
-                    const roll = rollKey ? String(row[rollKey]).trim() : null;
+        try {
+            // Parse the file (handles both CSV and Excel)
+            const results = await parseFile(file);
 
-                    if (!roll) return;
+            const attendedMap = new Map();
+            let matchCount = 0;
 
-                    if (!attendedMap.has(roll)) attendedMap.set(roll, {});
-                    const studentRecord = attendedMap.get(roll);
+            results.forEach(row => {
+                // Try getting Roll Number with various loose matches from the file row
+                // We look for 'rollnumber', 'rollno', 'rollid' etc.
+                const rollKey = findKey(row, 'rollnumber') || findKey(row, 'rollno') || findKey(row, 'rollid') || findKey(row, 'rollnoasperattendancemuster');
+                const roll = rollKey ? String(row[rollKey]).trim() : null;
 
-                    const monthKey = findKey(row, 'month');
-                    // Find "Total" and "Attended/Present" columns loosely
-                    const totalKey = Object.keys(row).find(k => k.toLowerCase().includes('total') || k.toLowerCase().includes('working'));
-                    // Look for 'attended', 'present', or 'days' (but not 'total days')
-                    const attendedKey = Object.keys(row).find(k => {
-                        const lower = k.toLowerCase();
-                        return (lower.includes('attended') || lower.includes('present')) && !lower.includes('total') && !lower.includes('working');
-                    });
+                if (!roll) return;
 
-                    const month = monthKey ? row[monthKey] : null;
-                    const total = totalKey ? row[totalKey] : null;
-                    const attended = attendedKey ? row[attendedKey] : null;
+                if (!attendedMap.has(roll)) attendedMap.set(roll, {});
+                const studentRecord = attendedMap.get(roll);
 
-                    if (month && total && attended) {
-                        const { percent, stipend } = calculateStipend(total, attended);
-                        const m = month.trim(); // Normalize month formatting
-
-                        studentRecord[`${m} Total`] = total;
-                        studentRecord[`${m} Attended`] = attended;
-                        studentRecord[`${m} %`] = percent;
-                        studentRecord[`${m} Stipend`] = stipend;
-                    }
+                const monthKey = findKey(row, 'month');
+                // Find "Total" and "Attended/Present" columns loosely
+                const totalKey = Object.keys(row).find(k => k.toLowerCase().includes('total') || k.toLowerCase().includes('working'));
+                // Look for 'attended', 'present', or 'days' (but not 'total days')
+                const attendedKey = Object.keys(row).find(k => {
+                    const lower = k.toLowerCase();
+                    return (lower.includes('attended') || lower.includes('present')) && !lower.includes('total') && !lower.includes('working');
                 });
 
-                let updatedCount = 0;
-                const updatedData = data.map(row => {
-                    // Match with main data Roll Number
-                    // We look for similar patterns in the main data row
-                    const rollKey = findKey(row, 'rollnumber') || findKey(row, 'rollno') || findKey(row, 'rollid') || 'Roll Number';
-                    const roll = row[rollKey] ? String(row[rollKey]).trim() : null;
+                const month = monthKey ? row[monthKey] : null;
+                const total = totalKey ? row[totalKey] : null;
+                const attended = attendedKey ? row[attendedKey] : null;
 
-                    const updates = attendedMap.get(roll);
+                if (month && total && attended) {
+                    const { percent, stipend } = calculateStipend(total, attended);
+                    const m = month.trim(); // Normalize month formatting
 
-                    if (updates) {
-                        updatedCount++;
-                        // MERGE instead of replace - preserve existing month data
-                        const newRow = { ...row, ...updates };
-                        if (newRow.originalRow) {
-                            newRow.originalRow = { ...newRow.originalRow, ...updates };
-                        }
-                        return newRow;
-                    }
-                    return row;
-                });
-
-                if (updatedCount === 0) {
-                    alert('No matching students found. Please check if "Roll Number" columns match properly.');
-                } else {
-                    alert(`Successfully updated attendance for ${updatedCount} students.`);
+                    studentRecord[`${m} Total`] = total;
+                    studentRecord[`${m} Attended`] = attended;
+                    studentRecord[`${m} %`] = percent;
+                    studentRecord[`${m} Stipend`] = stipend;
                 }
+            });
 
-                onUpdateData(updatedData);
-                setShowAttModal(false);
-                // Clear file input to allow re-upload
-                e.target.value = null;
+            let updatedCount = 0;
+            const updatedData = data.map(row => {
+                // Match with main data Roll Number
+                // We look for similar patterns in the main data row
+                const rollKey = findKey(row, 'rollnumber') || findKey(row, 'rollno') || findKey(row, 'rollid') || 'Roll Number';
+                const roll = row[rollKey] ? String(row[rollKey]).trim() : null;
+
+                const updates = attendedMap.get(roll);
+
+                if (updates) {
+                    updatedCount++;
+                    // MERGE instead of replace - preserve existing month data
+                    const newRow = { ...row, ...updates };
+                    if (newRow.originalRow) {
+                        newRow.originalRow = { ...newRow.originalRow, ...updates };
+                    }
+                    return newRow;
+                }
+                return row;
+            });
+
+            if (updatedCount === 0) {
+                alert('No matching students found. Please check if "Roll Number" columns match properly.');
+            } else {
+                alert(`Successfully updated attendance for ${updatedCount} students.`);
             }
-        });
+
+            onUpdateData(updatedData);
+            setShowAttModal(false);
+            // Clear file input to allow re-upload
+            e.target.value = null;
+        } catch (err) {
+            alert('Error processing file: ' + err.message);
+            console.error(err);
+        }
     };
 
     const handleManualAttSubmit = (e) => {
@@ -337,32 +386,40 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         setAttAttended('');
     };
 
-    const handleCSVImport = (e) => {
+    const handleCSVImport = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
 
-        Papa.parse(file, {
-            header: true,
-            skipEmptyLines: true,
-            complete: (results) => {
-                // Append new rows. We assume they are approved or just raw data? 
-                // Let's mark them as "Imported" status or just Approved default.
-                // User wanted to "add option to manually add some fields OR upload a CSV"
-                // Assuming upload means ADDING MORE DATA implies appending.
+        // Check if file format is supported
+        if (!isSupportedFileFormat(file)) {
+            alert('Please upload a valid file (CSV, XLSX, or XLS)');
+            return;
+        }
 
-                const currentMaxId = Math.max(...data.map(d => d.id), 0);
+        try {
+            // Parse the file (handles both CSV and Excel)
+            const results = await parseFile(file);
 
-                const newRows = results.data.map((row, idx) => ({
-                    ...row,
-                    id: currentMaxId + 1 + idx,
-                    internalStatus: 'Approved', // Auto-approve imported manual data?
-                    statusColor: 'bg-blue-500/20 text-blue-300 border-blue-500/50',
-                    originalRow: row
-                }));
+            // Append new rows. We assume they are approved or just raw data? 
+            // Let's mark them as "Imported" status or just Approved default.
+            // User wanted to "add option to manually add some fields OR upload a CSV"
+            // Assuming upload means ADDING MORE DATA implies appending.
 
-                onUpdateData([...data, ...newRows]);
-            }
-        });
+            const currentMaxId = Math.max(...data.map(d => d.id), 0);
+
+            const newRows = results.map((row, idx) => ({
+                ...row,
+                id: currentMaxId + 1 + idx,
+                internalStatus: 'Approved', // Auto-approve imported manual data?
+                statusColor: 'bg-blue-500/20 text-blue-300 border-blue-500/50',
+                originalRow: row
+            }));
+
+            onUpdateData([...data, ...newRows]);
+        } catch (err) {
+            alert('Error processing file: ' + err.message);
+            console.error(err);
+        }
     };
 
     const exportWordReport = async () => {
@@ -696,36 +753,43 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
 
     return (
         <div className="space-y-6 animate-in fade-in slide-in-from-right-4">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-4">
                 <div className="flex items-center gap-4">
-                    <button onClick={onBack} className="p-2 hover:bg-slate-800 rounded-full transition-colors">
+                    <button onClick={onBack} className="p-2 rounded-full transition-colors hover:bg-slate-800">
                         <ArrowLeft className="w-6 h-6 text-slate-400" />
                     </button>
                     <div>
                         <h2 className="text-2xl font-bold text-white">Enrichment Phase</h2>
-                        <p className="text-slate-400 text-sm">Add custom fields or merge data</p>
+                        <p className="text-sm text-slate-400">Add custom fields or merge data</p>
                     </div>
                 </div>
-                <button onClick={onLogout} className="btn-secondary text-slate-400 border-slate-700 hover:bg-slate-800 flex items-center gap-2">
-                    <LogOut className="w-4 h-4" />
-                    <span>Logout</span>
-                </button>
             </div>
 
-            <div className="flex justify-between items-center mb-6">
+            <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-6">
                 <h2 className="text-xl font-semibold text-white/90 flex items-center gap-2">
                     <FileSpreadsheet className="w-5 h-5 text-purple-400" />
                     Enrichment Panel
                 </h2>
-                <div className="flex gap-3 items-center">
+                <div className="flex flex-wrap gap-2 items-center">
                     {/* Search Input */}
                     <input
                         type="text"
                         placeholder="Search students..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 placeholder-slate-500 focus:outline-none focus:border-purple-500/50 w-48"
+                        className="rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500/50 w-full md:w-48 bg-slate-800/50 border border-slate-700 text-slate-300 placeholder-slate-500"
                     />
+
+                    {/* Month Selector */}
+                    <select
+                        value={selectedMonth}
+                        onChange={(e) => setSelectedMonth(e.target.value)}
+                        className="rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500/50 bg-slate-800/50 border border-slate-700 text-slate-300"
+                    >
+                        {months.map(m => (
+                            <option key={m} value={m}>{m}</option>
+                        ))}
+                    </select>
 
                     {/* Bulk Update Total Days */}
                     <div className="flex gap-2 items-center">
@@ -734,43 +798,32 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                             placeholder={`${selectedMonth} Total Days`}
                             value={bulkTotalDays}
                             onChange={(e) => setBulkTotalDays(e.target.value)}
-                            className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 placeholder-slate-500 focus:outline-none focus:border-purple-500/50 w-32"
+                            className="rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-purple-500/50 w-32 bg-slate-800/50 border border-slate-700 text-slate-300 placeholder-slate-500"
                         />
                         <button
                             onClick={handleBulkUpdateTotalDays}
                             disabled={!bulkTotalDays}
-                            className="btn-secondary text-blue-400 border-blue-500/20 hover:bg-blue-500/10 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-blue-400 border border-blue-500/20 hover:bg-blue-500/10"
                         >
                             Apply to All
                         </button>
                     </div>
 
-                    {/* Month Selector */}
-                    <select
-                        value={selectedMonth}
-                        onChange={(e) => setSelectedMonth(e.target.value)}
-                        className="bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-purple-500/50"
-                    >
-                        {months.map(m => (
-                            <option key={m} value={m}>{m}</option>
-                        ))}
-                    </select>
-
-                    <button onClick={() => setShowAttModal(true)} className="btn-secondary text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/10 flex items-center gap-2">
+                    <button onClick={() => setShowAttModal(true)} className="px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/10">
                         <Calendar className="w-4 h-4" />
-                        <span>Attendance</span>
+                        <span className="hidden sm:inline">Attendance</span>
                     </button>
-                    <button onClick={() => setShowAddModal(true)} className="btn-primary flex items-center gap-2">
+                    <button onClick={() => setShowAddModal(true)} className="btn-primary flex items-center gap-2 px-3 py-2">
                         <Plus className="w-4 h-4" />
-                        <span>Add Field to All</span>
+                        <span className="hidden sm:inline">Add Field</span>
                     </button>
-                    <button onClick={exportFinal} className="btn-primary bg-indigo-600 hover:bg-indigo-500 flex items-center gap-2">
+                    <button onClick={exportFinal} className="px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white">
                         <Download className="w-4 h-4" />
-                        <span>Export Final (CSV)</span>
+                        <span className="hidden sm:inline">Export CSV</span>
                     </button>
-                    <button onClick={exportWordReport} className="btn-primary bg-blue-600 hover:bg-blue-500 flex items-center gap-2">
+                    <button onClick={exportWordReport} className="px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white">
                         <FileText className="w-4 h-4" />
-                        <span>Export Word Report</span>
+                        <span className="hidden sm:inline">Export Word</span>
                     </button>
                 </div>
             </div>
@@ -779,23 +832,40 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                     <table className="w-full text-left border-collapse">
                         <thead>
                             <tr className="bg-slate-900/80 border-b border-slate-700 text-slate-400 text-xs uppercase tracking-wider sticky top-0 backdrop-blur-md z-10">
-                                {displayKeys.map(key => (
-                                    <th key={key} className="p-4 font-medium whitespace-nowrap">
-                                        {key.length > 50 && key.toLowerCase().includes('term') ? 'T&C' : key}
-                                    </th>
-                                ))}
+                                {displayKeys.map(key => {
+                                    // Use getDisplayName from logic scope
+                                    const displayName = getDisplayName(key);
+                                    // Check if it's an attendance key for special formatting
+                                    const isAttendance = key.startsWith(`${selectedMonth} `) && (key.includes('Total') || key.includes('Attended') || key.includes('%') || key.includes('Stipend'));
+                                    
+                                    return (
+                                        <th key={key} className="p-4 font-medium whitespace-nowrap align-bottom">
+                                            {isAttendance ? (
+                                                <div className="flex flex-col gap-0.5">
+                                                    <span>{displayName}</span>
+                                                    <span className="text-[10px] opacity-70 font-normal">({selectedMonth})</span>
+                                                </div>
+                                            ) : (
+                                                displayName
+                                            )}
+                                        </th>
+                                    );
+                                })}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800 text-sm">
                             {filteredData.map((row) => (
-                                <tr key={row.id} className="hover:bg-slate-800/40 transition-colors">
+                                <tr key={row.id} className="transition-colors hover:bg-slate-800/40">
                                     {displayKeys.map(key => {
                                         const isEditing = editingCell?.id === row.id && editingCell?.key === key;
                                         return (
                                             <td
                                                 key={key}
                                                 onDoubleClick={() => startEditing(row, key)}
-                                                className={`p-4 text-slate-300 max-w-xs border-r border-slate-800/50 last:border-0 ${isEditing ? 'p-2' : ''}`}
+                                                className={clsx(
+                                                    "p-4 max-w-xs border-r border-slate-800/50 last:border-0 text-slate-300",
+                                                    isEditing && 'p-2'
+                                                )}
                                                 title={!isEditing && typeof row[key] === 'string' ? row[key] : ''}
                                             >
                                                 {isEditing ? (
@@ -806,14 +876,14 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                                                         onChange={(e) => setEditValue(e.target.value)}
                                                         onBlur={saveEdit}
                                                         onKeyDown={handleKeyDown}
-                                                        className="w-full bg-slate-900 border border-blue-500 rounded px-2 py-1 text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                                        className="w-full border border-blue-500 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500 bg-slate-900 text-white"
                                                     />
                                                 ) : isURL(row[key]) ? (
                                                     <a
                                                         href={row[key]}
                                                         target="_blank"
                                                         rel="noopener noreferrer"
-                                                        className="inline-flex items-center gap-1 px-3 py-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded border border-blue-500/30 text-xs transition-colors"
+                                                        className="inline-flex items-center gap-1 px-3 py-1 rounded border text-xs transition-colors bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border-blue-500/30"
                                                     >
                                                         <span>View</span>
                                                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -821,7 +891,7 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                                                         </svg>
                                                     </a>
                                                 ) : (
-                                                    <span className="cursor-text hover:text-white block w-full h-full min-h-[1.5em]">{row[key]}</span>
+                                                    <span className="cursor-text block w-full h-full min-h-[1.5em] hover:text-white">{row[key]}</span>
                                                 )}
                                             </td>
                                         );
@@ -842,27 +912,27 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 showAddModal && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
                         <div className="glass-panel w-full max-w-md rounded-2xl p-6 relative animate-in zoom-in-95">
-                            <h3 className="text-xl font-bold text-white mb-4">Add Field to All Data</h3>
+                            <h3 className="text-xl font-bold mb-4 text-white">Add Field to All Data</h3>
                             <form onSubmit={handleBulkAdd} className="space-y-4">
                                 <div>
-                                    <label className="text-sm text-slate-400 block mb-1">Field Name (Column Header)</label>
+                                    <label className="text-sm block mb-1 text-slate-400">Field Name (Column Header)</label>
                                     <input
                                         type="text"
                                         value={newFieldName}
                                         onChange={(e) => setNewFieldName(e.target.value)}
                                         placeholder="e.g. Scholarship Amount"
-                                        className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-blue-500"
+                                        className="w-full border border-slate-700 rounded-lg p-2.5 focus:outline-none focus:border-blue-500 bg-slate-800 text-white"
                                         autoFocus
                                     />
                                 </div>
                                 <div>
-                                    <label className="text-sm text-slate-400 block mb-1">Default Value</label>
+                                    <label className="text-sm block mb-1 text-slate-400">Default Value</label>
                                     <input
                                         type="text"
                                         value={newFieldValue}
                                         onChange={(e) => setNewFieldValue(e.target.value)}
                                         placeholder="e.g. 50000"
-                                        className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-blue-500"
+                                        className="w-full border border-slate-700 rounded-lg p-2.5 focus:outline-none focus:border-blue-500 bg-slate-800 text-white"
                                     />
                                 </div>
                                 <div className="flex justify-end gap-3 pt-4">
@@ -879,18 +949,28 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 showAttModal && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
                         <div className="glass-panel w-full max-w-md rounded-2xl p-6 relative animate-in zoom-in-95">
-                            <h3 className="text-xl font-bold text-white mb-4">Attendance Management</h3>
+                            <h3 className="text-xl font-bold mb-4 text-white">Attendance Management</h3>
 
-                            <div className="flex bg-slate-800 p-1 rounded-lg mb-6">
+                            <div className="flex p-1 rounded-lg mb-6 bg-slate-800">
                                 <button
                                     onClick={() => setAttMode('manual')}
-                                    className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-all ${attMode === 'manual' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}
+                                    className={clsx(
+                                        "flex-1 py-1.5 text-sm font-medium rounded-md transition-all",
+                                        attMode === 'manual'
+                                            ? "bg-indigo-600 text-white shadow-lg"
+                                            : "text-slate-400 hover:text-slate-200"
+                                    )}
                                 >
                                     Manual Entry
                                 </button>
                                 <button
                                     onClick={() => setAttMode('csv')}
-                                    className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-all ${attMode === 'csv' ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200'}`}
+                                    className={clsx(
+                                        "flex-1 py-1.5 text-sm font-medium rounded-md transition-all",
+                                        attMode === 'csv'
+                                            ? "bg-indigo-600 text-white shadow-lg"
+                                            : "text-slate-400 hover:text-slate-200"
+                                    )}
                                 >
                                     CSV Upload
                                 </button>
@@ -899,34 +979,34 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                             {attMode === 'manual' ? (
                                 <form onSubmit={handleManualAttSubmit} className="space-y-4">
                                     <div>
-                                        <label className="text-sm text-slate-400 block mb-1">Month Name</label>
+                                        <label className="text-sm block mb-1 text-slate-400">Month Name</label>
                                         <input
                                             type="text"
                                             value={attMonth}
                                             onChange={(e) => setAttMonth(e.target.value)}
                                             placeholder="e.g. Jan"
-                                            className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500"
+                                            className="w-full border border-slate-700 rounded-lg p-2.5 focus:outline-none focus:border-indigo-500 bg-slate-800 text-white"
                                         />
                                     </div>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="text-sm text-slate-400 block mb-1">Total Days</label>
+                                            <label className="text-sm block mb-1 text-slate-400">Total Days</label>
                                             <input
                                                 type="number"
                                                 value={attTotalDays}
                                                 onChange={(e) => setAttTotalDays(e.target.value)}
                                                 placeholder="25"
-                                                className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500"
+                                                className="w-full border border-slate-700 rounded-lg p-2.5 focus:outline-none focus:border-indigo-500 bg-slate-800 text-white"
                                             />
                                         </div>
                                         <div>
-                                            <label className="text-sm text-slate-400 block mb-1">Attended</label>
+                                            <label className="text-sm block mb-1 text-slate-400">Attended</label>
                                             <input
                                                 type="number"
                                                 value={attAttended}
                                                 onChange={(e) => setAttAttended(e.target.value)}
                                                 placeholder="20"
-                                                className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500"
+                                                className="w-full border border-slate-700 rounded-lg p-2.5 focus:outline-none focus:border-indigo-500 bg-slate-800 text-white"
                                             />
                                         </div>
                                     </div>
@@ -939,14 +1019,14 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                                 <div className="space-y-4 text-center py-4">
                                     <div className="p-8 border-2 border-dashed border-slate-700 rounded-xl hover:border-indigo-500/50 transition-colors bg-slate-800/30">
                                         <Upload className="w-10 h-10 text-indigo-400 mx-auto mb-3" />
-                                        <p className="text-slate-300 font-medium mb-1">Upload Attendance CSV</p>
-                                        <p className="text-xs text-slate-500 mb-4">Required columns: Roll Number, Month, Total Working Days, Attended Days</p>
+                                        <p className="font-medium mb-1 text-slate-300">Upload Attendance File</p>
+                                        <p className="text-xs mb-4 text-slate-500">Required columns: Roll Number, Month, Total Working Days, Attended Days. Supports CSV, XLSX, XLS</p>
                                         <label className="btn-primary cursor-pointer inline-flex">
                                             Select File
-                                            <input type="file" accept=".csv" className="hidden" onChange={handleAttendanceCSV} />
+                                            <input type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={handleAttendanceCSV} />
                                         </label>
                                     </div>
-                                    <button type="button" onClick={() => setShowAttModal(false)} className="text-slate-400 hover:text-white text-sm">Cancel</button>
+                                    <button type="button" onClick={() => setShowAttModal(false)} className="text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
                                 </div>
                             )}
                         </div>

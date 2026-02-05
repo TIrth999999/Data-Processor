@@ -8,7 +8,7 @@ const Login = ({ onLogin }) => {
 
     const handleLogin = (e) => {
         e.preventDefault();
-        if (username === 'admin' && password === 'admin') {
+        if (username === 'Rgajera' && password === 'Gajera@99') {
             onLogin(true);
         } else {
             setError('Invalid credentials');

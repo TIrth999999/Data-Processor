@@ -3,8 +3,10 @@ import Login from './components/Login';
 import FileUpload from './components/FileUpload';
 import DataTable from './components/DataTable';
 import EnrichmentPanel from './components/EnrichmentPanel';
+import Navbar from './components/Navbar';
 import Papa from 'papaparse';
 import { LayoutDashboard, Download, CheckCircle, XCircle, AlertTriangle, ArrowRight, LogOut } from 'lucide-react';
+import { clsx } from 'clsx';
 
 const App = () => {
   // Persistence Initialization
@@ -93,16 +95,19 @@ const App = () => {
     const approvedData = data.filter(d => d.internalStatus === 'Approved');
 
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-8">
-        <EnrichmentPanel
-          data={approvedData}
-          onUpdateData={(updatedSubset) => {
-            const updateMap = new Map(updatedSubset.map(d => [d.id, d]));
-            setData(prev => prev.map(row => updateMap.get(row.id) || row));
-          }}
-          onBack={() => setAppStep('verification')}
-          onLogout={handleLogout}
-        />
+      <div className="min-h-screen bg-slate-950 text-slate-100">
+        <Navbar onLogout={handleLogout} />
+        <div className="p-6 md:p-8">
+          <EnrichmentPanel
+            data={approvedData}
+            onUpdateData={(updatedSubset) => {
+              const updateMap = new Map(updatedSubset.map(d => [d.id, d]));
+              setData(prev => prev.map(row => updateMap.get(row.id) || row));
+            }}
+            onBack={() => setAppStep('verification')}
+            onLogout={handleLogout}
+          />
+        </div>
       </div>
     )
   }
@@ -119,75 +124,67 @@ const App = () => {
   } : { All: 0, Approved: 0, Review: 0, Rejected: 0 };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-8">
-      {/* Header */}
-      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
-        <div className="flex items-center gap-3">
-          <div className="p-3 bg-blue-500/10 rounded-xl border border-blue-500/20 text-blue-400">
-            <LayoutDashboard className="w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-white">CSC Processor</h1>
-            <p className="text-slate-400 text-sm">Admin Dashboard</p>
-          </div>
-        </div>
-
-        <div className="flex gap-3">
-          <button onClick={handleLogout} className="btn-secondary text-slate-400 border-slate-700 hover:bg-slate-800 flex items-center gap-2">
-            <LogOut className="w-4 h-4" />
-            <span>Logout</span>
-          </button>
-
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <Navbar onLogout={handleLogout} />
+      <div className="p-6 md:p-8">
+        {/* Header Actions */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
           {data && (
-            <>
-              <button onClick={handleReset} className="btn-secondary text-red-400 border-red-500/20 hover:bg-red-500/10">
+            <div className="flex flex-wrap gap-3">
+              <button 
+                onClick={handleReset} 
+                className="px-4 py-2 rounded-lg text-sm font-medium transition-all text-red-400 border border-red-500/20 hover:bg-red-500/10"
+              >
                 Reset Data
               </button>
               <button
                 onClick={() => setAppStep('enrichment')}
-                className="btn-primary flex items-center gap-2"
+                className="px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/20"
               >
                 <ArrowRight className="w-4 h-4" />
                 <span>Proceed Further</span>
               </button>
-            </>
+            </div>
           )}
         </div>
-      </header>
 
-      {!data ? (
-        <FileUpload onDataProcessed={setData} />
-      ) : (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        {!data ? (
+          <FileUpload onDataProcessed={setData} />
+        ) : (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
-          {/* Stats Cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {[
-              { label: 'Total Records', value: counts.All, color: 'text-slate-200', icon: LayoutDashboard, filter: 'All' },
-              { label: 'Approved', value: counts.Approved, color: 'text-green-400', icon: CheckCircle, filter: 'Approved' },
-              { label: 'Pending Review', value: counts.Review, color: 'text-amber-400', icon: AlertTriangle, filter: 'Review' },
-              { label: 'Rejected', value: counts.Rejected, color: 'text-red-400', icon: XCircle, filter: 'Rejected' },
-            ].map((stat) => (
-              <button
-                key={stat.label}
-                onClick={() => setFilter(stat.filter)}
-                className={`glass-card p-4 rounded-xl text-left border-l-4 transition-all ${filter === stat.filter ? 'bg-slate-800' : ''} ${stat.filter === 'Review' ? 'border-amber-500' :
-                  stat.filter === 'Approved' ? 'border-green-500' :
-                    stat.filter === 'Rejected' ? 'border-red-500' : 'border-blue-500'
-                  }`}
-              >
-                <div className="flex justify-between items-start mb-2">
-                  <p className="text-slate-400 text-sm font-medium">{stat.label}</p>
-                  <stat.icon className={`w-5 h-5 ${stat.color} opacity-80`} />
-                </div>
-                <p className={`text-2xl font-bold ${stat.color}`}>{stat.value}</p>
-              </button>
-            ))}
+            {/* Stats Cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[
+                { label: 'Total Records', value: counts.All, color: 'text-slate-200', icon: LayoutDashboard, filter: 'All' },
+                { label: 'Approved', value: counts.Approved, color: 'text-green-400', icon: CheckCircle, filter: 'Approved' },
+                { label: 'Pending Review', value: counts.Review, color: 'text-amber-400', icon: AlertTriangle, filter: 'Review' },
+                { label: 'Rejected', value: counts.Rejected, color: 'text-red-400', icon: XCircle, filter: 'Rejected' },
+              ].map((stat) => (
+                <button
+                  key={stat.label}
+                  onClick={() => setFilter(stat.filter)}
+                  className={clsx(
+                    "p-4 rounded-xl text-left border-l-4 transition-all glass-card",
+                    filter === stat.filter && 'bg-slate-800',
+                    stat.filter === 'Review' ? 'border-amber-500' :
+                      stat.filter === 'Approved' ? 'border-green-500' :
+                        stat.filter === 'Rejected' ? 'border-red-500' : 'border-blue-500'
+                  )}
+                >
+                  <div className="flex justify-between items-start mb-2">
+                    <p className="text-sm font-medium text-slate-400">{stat.label}</p>
+                    <stat.icon className={`w-5 h-5 ${stat.color} opacity-80`} />
+                  </div>
+                  <p className={`text-2xl font-bold ${stat.color}`}>{stat.value}</p>
+                </button>
+              ))}
+            </div>
+
+            <DataTable data={filteredData} onAction={handleAction} />
           </div>
-
-          <DataTable data={filteredData} onAction={handleAction} />
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

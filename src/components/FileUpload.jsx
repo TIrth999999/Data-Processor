@@ -1,47 +1,70 @@
 import React, { useRef, useState } from 'react';
 import Papa from 'papaparse';
-import { Upload, FileText, CheckCircle, AlertCircle } from 'lucide-react';
+import { Upload, FileText, CheckCircle, AlertCircle, Database, Briefcase } from 'lucide-react';
 import { clsx } from 'clsx';
 import { processData } from '../utils/dataProcessor';
+import { processExperienceData } from '../utils/experienceProcessor';
+import { parseFile, isSupportedFileFormat, getFileTypeDescription } from '../utils/fileParser';
 
 const FileUpload = ({ onDataProcessed }) => {
     const fileInputRef = useRef(null);
     const [isDragOver, setIsDragOver] = useState(false);
     const [error, setError] = useState('');
     const [isProcessing, setIsProcessing] = useState(false);
+    const [uploadMode, setUploadMode] = useState('stipend'); // 'stipend' | 'experience'
 
-    const handleFile = (file) => {
+    const handleFile = async (file, mode) => {
         setError('');
-        if (file.type !== 'text/csv' && !file.name.endsWith('.csv')) {
-            setError('Please upload a valid CSV file');
+        
+        // Check if file format is supported
+        if (!isSupportedFileFormat(file)) {
+            setError('Please upload a valid file (CSV, XLSX, or XLS)');
             return;
         }
 
         setIsProcessing(true);
-        Papa.parse(file, {
-            header: true,
-            skipEmptyLines: true,
-            complete: (results) => {
-                if (results.errors.length > 0) {
-                    console.error("CSV Errors:", results.errors);
-                    // Show warning but proceed if data exists
-                }
-
-                try {
-                    const processed = processData(results.data);
-                    onDataProcessed(processed);
-                } catch (err) {
-                    setError('Error processing data. Please check CSV format.');
-                    console.error(err);
-                } finally {
-                    setIsProcessing(false);
-                }
-            },
-            error: (err) => {
-                setError('Failed to parse CSV file');
+        
+        try {
+            // Parse the file (handles both CSV and Excel)
+            const data = await parseFile(file);
+            
+            if (!data || data.length === 0) {
+                setError('The file appears to be empty or has no valid data');
                 setIsProcessing(false);
+                return;
             }
-        });
+
+            // Process the data based on mode
+            let processed;
+            if (mode === 'experience') {
+                processed = processExperienceData(data);
+                
+                // Direct Download for Experience Mode
+                const exportData = processed.map(row => row.originalRow);
+                const csv = Papa.unparse(exportData);
+                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = `processed_experience_${new Date().getTime()}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                // Show success feedback (using error state for now to reuse UI, but distinguishing safely would be better, 
+                // but effectively we just stop processing and don't change screen)
+                setIsProcessing(false);
+                return; 
+            } else {
+                processed = processData(data);
+            }
+            
+            onDataProcessed(processed);
+        } catch (err) {
+            setError(err.message || `Error processing ${getFileTypeDescription(file)} file. Please check the file format.`);
+            console.error(err);
+        } finally {
+            setIsProcessing(false);
+        }
     };
 
     const onDragOver = (e) => {
@@ -59,16 +82,55 @@ const FileUpload = ({ onDataProcessed }) => {
         setIsDragOver(false);
         const files = e.dataTransfer.files;
         if (files.length > 0) {
-            handleFile(files[0]);
+            handleFile(files[0], uploadMode);
+        }
+    };
+
+    const handleFileSelect = (e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            handleFile(file, uploadMode);
         }
     };
 
     return (
-        <div className="w-full max-w-2xl mx-auto my-12">
+        <div className="w-full max-w-4xl mx-auto my-12">
+            {/* Mode Selection */}
+            <div className="mb-6 p-1 rounded-xl bg-slate-800 transition-colors">
+                <div className="flex gap-2">
+                    <button
+                        onClick={() => setUploadMode('stipend')}
+                        className={clsx(
+                            "flex-1 py-3 px-4 rounded-lg font-medium transition-all flex items-center justify-center gap-2",
+                            uploadMode === 'stipend'
+                                ? "bg-blue-600 text-white shadow-lg"
+                                : "text-slate-400 hover:text-white"
+                        )}
+                    >
+                        <Database className="w-5 h-5" />
+                        <span>Process Stipend Data</span>
+                    </button>
+                    <button
+                        onClick={() => setUploadMode('experience')}
+                        className={clsx(
+                            "flex-1 py-3 px-4 rounded-lg font-medium transition-all flex items-center justify-center gap-2",
+                            uploadMode === 'experience'
+                                ? "bg-blue-600 text-white shadow-lg"
+                                : "text-slate-400 hover:text-white"
+                        )}
+                    >
+                        <Briefcase className="w-5 h-5" />
+                        <span>Process Experience Data</span>
+                    </button>
+                </div>
+            </div>
+
+            {/* Upload Area */}
             <div
                 className={clsx(
                     "relative group cursor-pointer glass-panel rounded-2xl border-2 border-dashed transition-all duration-300 p-12 text-center overflow-hidden",
-                    isDragOver ? "border-blue-500 bg-blue-500/10" : "border-slate-700 hover:border-blue-500/50 hover:bg-slate-800/50"
+                    "border-slate-700 hover:border-blue-500/50 hover:bg-slate-800/50",
+                    isDragOver && "border-blue-500 bg-blue-500/10"
                 )}
                 onDragOver={onDragOver}
                 onDragLeave={onDragLeave}
@@ -77,16 +139,18 @@ const FileUpload = ({ onDataProcessed }) => {
             >
                 <input
                     type="file"
-                    accept=".csv"
+                    accept=".csv,.xlsx,.xls"
                     className="hidden"
                     ref={fileInputRef}
-                    onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+                    onChange={handleFileSelect}
                 />
 
                 <div className="relative z-10 flex flex-col items-center gap-4">
                     <div className={clsx(
                         "w-20 h-20 rounded-full flex items-center justify-center transition-all duration-500",
-                        isProcessing ? "bg-blue-500/20 animate-pulse" : "bg-slate-800 group-hover:bg-blue-500/20"
+                        isProcessing 
+                            ? "bg-blue-500/20 animate-pulse"
+                            : "bg-slate-800 group-hover:bg-blue-500/20"
                     )}>
                         {isProcessing ? (
                             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
@@ -97,10 +161,12 @@ const FileUpload = ({ onDataProcessed }) => {
 
                     <div className="space-y-1">
                         <h3 className="text-xl font-semibold text-white group-hover:text-blue-200 transition-colors">
-                            {isProcessing ? "Processing Data..." : "Upload CSV File"}
+                            {isProcessing ? "Processing Data..." : `Upload File - ${uploadMode === 'stipend' ? 'Stipend Data' : 'Experience Data'}`}
                         </h3>
-                        <p className="text-slate-400 text-sm">
-                            Drag & drop or click to browse
+                        <p className="text-sm text-slate-400">
+                            {uploadMode === 'experience' 
+                                ? 'File must contain "experience" column (format: years_months_days, e.g., 10_5_1). Supports CSV, XLSX, XLS'
+                                : 'Drag & drop or click to browse. Supports CSV, XLSX, XLS formats'}
                         </p>
                     </div>
                 </div>
