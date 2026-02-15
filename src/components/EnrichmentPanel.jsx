@@ -3,10 +3,25 @@ import { Download, Plus, Upload, Save, Trash2, Database, ArrowLeft, Calendar, Fi
 import { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType, HeadingLevel, BorderStyle } from 'docx';
 import { saveAs } from 'file-saver';
 import { clsx } from 'clsx';
+import Papa from 'papaparse';
 import { parseFile, isSupportedFileFormat } from '../utils/fileParser';
 
 const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthAliasMap = {
+        jan: 'Jan', january: 'Jan', '1': 'Jan', '01': 'Jan',
+        feb: 'Feb', february: 'Feb', '2': 'Feb', '02': 'Feb',
+        mar: 'Mar', march: 'Mar', '3': 'Mar', '03': 'Mar',
+        apr: 'Apr', april: 'Apr', '4': 'Apr', '04': 'Apr',
+        may: 'May', '5': 'May', '05': 'May',
+        jun: 'Jun', june: 'Jun', '6': 'Jun', '06': 'Jun',
+        jul: 'Jul', july: 'Jul', '7': 'Jul', '07': 'Jul',
+        aug: 'Aug', august: 'Aug', '8': 'Aug', '08': 'Aug',
+        sep: 'Sep', sept: 'Sep', september: 'Sep', '9': 'Sep', '09': 'Sep',
+        oct: 'Oct', october: 'Oct', '10': 'Oct',
+        nov: 'Nov', november: 'Nov', '11': 'Nov',
+        dec: 'Dec', december: 'Dec', '12': 'Dec',
+    };
 
     // State definitions
     const [newFieldName, setNewFieldName] = useState('');
@@ -42,6 +57,68 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
             percent: pct.toFixed(1) + '%',
             stipend: pct > 60 ? '2000' : '0'
         };
+    };
+
+    const toAmount = (value) => {
+        if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+        const normalized = String(value ?? '').replace(/,/g, '').trim();
+        const num = Number(normalized);
+        return Number.isFinite(num) ? num : 0;
+    };
+
+    const normalizeMonth = (value) => {
+        const token = String(value ?? '').trim().toLowerCase().replace(/\./g, '');
+        return monthAliasMap[token] || null;
+    };
+
+    const parseMonthMetricKey = (key) => {
+        const match = String(key ?? '').trim().match(/^(.+?)\s*(Total|Attended|Stipend|%)$/i);
+        if (!match) return null;
+        const month = normalizeMonth(match[1]);
+        if (!month) return null;
+        return { month, metric: match[2].toLowerCase() };
+    };
+
+    const resolveMonthKeys = (rows, month) => {
+        let attendanceKey = `${month} %`;
+        let stipendKey = `${month} Stipend`;
+        const allKeys = new Set();
+
+        rows.forEach((row) => {
+            Object.keys(row || {}).forEach((k) => allKeys.add(k));
+        });
+
+        if (!allKeys.has(attendanceKey) || !allKeys.has(stipendKey)) {
+            allKeys.forEach((key) => {
+                const parsed = parseMonthMetricKey(key);
+                if (!parsed || parsed.month !== month) return;
+                if (parsed.metric === '%') attendanceKey = key;
+                if (parsed.metric === 'stipend') stipendKey = key;
+            });
+        }
+
+        return { attendanceKey, stipendKey };
+    };
+
+    const resolveMonthAttendanceKeys = (rows, month) => {
+        let totalKey = `${month} Total`;
+        let attendedKey = `${month} Attended`;
+        const allKeys = new Set();
+
+        rows.forEach((row) => {
+            Object.keys(row || {}).forEach((k) => allKeys.add(k));
+        });
+
+        if (!allKeys.has(totalKey) || !allKeys.has(attendedKey)) {
+            allKeys.forEach((key) => {
+                const parsed = parseMonthMetricKey(key);
+                if (!parsed || parsed.month !== month) return;
+                if (parsed.metric === 'total') totalKey = key;
+                if (parsed.metric === 'attended') attendedKey = key;
+            });
+        }
+
+        return { totalKey, attendedKey };
     };
 
     const handleSave = (id, key, value) => {
@@ -230,15 +307,21 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
     const handleBulkUpdateTotalDays = () => {
         if (!bulkTotalDays || !selectedMonth) return;
 
+        const { totalKey, attendedKey } = resolveMonthAttendanceKeys(data, selectedMonth);
+        const hasMonthAttendanceColumn = data.some(row => Object.prototype.hasOwnProperty.call(row, attendedKey));
+        if (!hasMonthAttendanceColumn) {
+            alert(`No "${selectedMonth} Attended" data found. Import/add attendance for ${selectedMonth} first.`);
+            return;
+        }
         let updateCount = 0;
         const updatedData = data.map(row => {
-            const totalKey = `${selectedMonth} Total`;
-            const attendedKey = `${selectedMonth} Attended`;
-
             // Only update if this student has attendance data for this month
-            if (row[attendedKey]) {
+            const hasAttended = Object.prototype.hasOwnProperty.call(row, attendedKey);
+            const attendedValue = row[attendedKey];
+            const hasUsableAttended = attendedValue !== undefined && attendedValue !== null && String(attendedValue).trim() !== '';
+            if (hasAttended && hasUsableAttended) {
                 updateCount++;
-                const { percent, stipend } = calculateStipend(bulkTotalDays, row[attendedKey]);
+                const { percent, stipend } = calculateStipend(bulkTotalDays, attendedValue);
                 const updates = {
                     [totalKey]: bulkTotalDays,
                     [`${selectedMonth} %`]: percent,
@@ -309,9 +392,10 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 const total = totalKey ? row[totalKey] : null;
                 const attended = attendedKey ? row[attendedKey] : null;
 
-                if (month && total && attended) {
+                const normalizedMonth = normalizeMonth(month);
+                if (normalizedMonth && total && attended) {
                     const { percent, stipend } = calculateStipend(total, attended);
-                    const m = month.trim(); // Normalize month formatting
+                    const m = normalizedMonth;
 
                     studentRecord[`${m} Total`] = total;
                     studentRecord[`${m} Attended`] = attended;
@@ -362,7 +446,11 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         if (!attMonth || !attTotalDays || !attAttended) return;
 
         const { percent, stipend } = calculateStipend(attTotalDays, attAttended);
-        const prefix = attMonth.trim();
+        const prefix = normalizeMonth(attMonth);
+        if (!prefix) {
+            alert('Invalid month. Use Jan/January or month number (1-12).');
+            return;
+        }
 
         const updatedData = data.map(row => {
             const updates = {
@@ -436,8 +524,7 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         const rollKey = Object.keys(data[0] || {}).find(k => k.toLowerCase().includes('roll'));
         const subCastKey = Object.keys(data[0] || {}).find(k => k.toLowerCase().includes('sub') && k.toLowerCase().includes('cast'));
 
-        const attendanceKey = `${selectedMonth} %`;
-        const stipendKey = `${selectedMonth} Stipend`;
+        const { attendanceKey, stipendKey } = resolveMonthKeys(data, selectedMonth);
 
         const categories = ['GENERAL', 'SEBC', 'SC', 'ST'];
         const categoryData = {};
@@ -519,11 +606,11 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 const row = [i + 1, s[rollKey] || '', s[nameKey] || '', s[genderKey] || ''];
                 if (!isGeneral) row.push(s[subCastKey] || '');
                 row.push(s[attendanceKey] || '0%');
-                row.push((parseFloat(s[stipendKey]) || 0).toLocaleString());
+                row.push(toAmount(s[stipendKey]).toLocaleString());
                 return row;
             });
 
-            const catTotal = catStudents.reduce((sum, s) => sum + (parseFloat(s[stipendKey]) || 0), 0);
+            const catTotal = catStudents.reduce((sum, s) => sum + toAmount(s[stipendKey]), 0);
             const totalRow = ['', '', 'TOTAL', ''];
             if (!isGeneral) totalRow.push('');
             totalRow.push('');
@@ -550,8 +637,8 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
             const catStudents = categoryData[cat].filter(s => s[attendanceKey] !== undefined);
             const male = catStudents.filter(s => ['M', 'MALE'].includes(String(s[genderKey]).toUpperCase()));
             const female = catStudents.filter(s => ['F', 'FEMALE'].includes(String(s[genderKey]).toUpperCase()));
-            const mAmt = male.reduce((sum, s) => sum + (parseFloat(s[stipendKey]) || 0), 0);
-            const fAmt = female.reduce((sum, s) => sum + (parseFloat(s[stipendKey]) || 0), 0);
+            const mAmt = male.reduce((sum, s) => sum + toAmount(s[stipendKey]), 0);
+            const fAmt = female.reduce((sum, s) => sum + toAmount(s[stipendKey]), 0);
             return [
                 cat,
                 male.length, mAmt.toLocaleString(),
@@ -561,9 +648,9 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         });
 
         const totalM = summaryRows.reduce((a, b) => a + b[1], 0);
-        const totalMA = summaryRows.reduce((a, b) => a + (parseFloat(b[2].replace(/,/g, '')) || 0), 0);
+        const totalMA = summaryRows.reduce((a, b) => a + toAmount(b[2]), 0);
         const totalF = summaryRows.reduce((a, b) => a + b[3], 0);
-        const totalFA = summaryRows.reduce((a, b) => a + (parseFloat(b[4].replace(/,/g, '')) || 0), 0);
+        const totalFA = summaryRows.reduce((a, b) => a + toAmount(b[4]), 0);
 
         summaryRows.push([
             "Total",
@@ -595,8 +682,18 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
         const link = document.createElement('a');
         link.href = URL.createObjectURL(blob);
         link.download = filename;
+        document.body.appendChild(link);
         link.click();
-        setTimeout(() => URL.revokeObjectURL(link.href), 100);
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(link.href), 250);
+    };
+
+    const downloadCSVBatch = (files) => {
+        files.forEach((file, index) => {
+            setTimeout(() => {
+                downloadCSV(file.csvContent, file.filename);
+            }, index * 180);
+        });
     };
 
     const exportFinal = () => {
@@ -618,9 +715,13 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
             return;
         }
 
-        // Attendance and Stipend keys for the selected month
-        const attendanceKey = `${selectedMonth} %`;
-        const stipendKey = `${selectedMonth} Stipend`;
+        // Attendance and stipend keys for the selected month, with fallback for legacy month formats.
+        const { attendanceKey, stipendKey } = resolveMonthKeys(data, selectedMonth);
+
+        if (!data.some(row => Object.prototype.hasOwnProperty.call(row, attendanceKey))) {
+            alert(`No attendance data found for ${selectedMonth}.`);
+            return;
+        }
 
         // Group by category
         const categories = ['GENERAL', 'SEBC', 'SC', 'ST'];
@@ -653,8 +754,8 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 return gender === 'F' || gender === 'FEMALE';
             });
 
-            const maleAmount = maleStudents.reduce((sum, s) => sum + (parseFloat(s[stipendKey]) || 0), 0);
-            const femaleAmount = femaleStudents.reduce((sum, s) => sum + (parseFloat(s[stipendKey]) || 0), 0);
+            const maleAmount = maleStudents.reduce((sum, s) => sum + toAmount(s[stipendKey]), 0);
+            const femaleAmount = femaleStudents.reduce((sum, s) => sum + toAmount(s[stipendKey]), 0);
 
             summaryRows.push({
                 'Category': cat,
@@ -683,8 +784,11 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
             'Amount (Rs.)': (totalMaleAmount + totalFemaleAmount).toLocaleString()
         });
 
-        // Download summary
-        downloadCSV(Papa.unparse(summaryRows), `summary_${selectedMonth.toLowerCase()}.csv`);
+        const filesToDownload = [];
+        filesToDownload.push({
+            csvContent: Papa.unparse(summaryRows),
+            filename: `summary_${selectedMonth.toLowerCase()}.csv`
+        });
 
         // Generate category-specific CSVs
         categories.forEach(cat => {
@@ -709,13 +813,13 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 }
 
                 item[attHeader] = row[attendanceKey] || '0%';
-                item[stpHeader] = parseFloat(row[stipendKey]) || 0;
+                item[stpHeader] = toAmount(row[stipendKey]);
 
                 return item;
             });
 
             // Calculate total stipend for this category/month
-            const totalStipendForCat = catStudents.reduce((sum, s) => sum + (parseFloat(s[stipendKey]) || 0), 0);
+            const totalStipendForCat = catStudents.reduce((sum, s) => sum + toAmount(s[stipendKey]), 0);
 
             // Add TOTAL row at the bottom
             const totalRow = {
@@ -731,7 +835,10 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
             const finalExportData = [...exportData, totalRow];
 
             // Full data (all students with attendance for this month)
-            downloadCSV(Papa.unparse(finalExportData), `${cat.toLowerCase()}_full_${selectedMonth.toLowerCase()}.csv`);
+            filesToDownload.push({
+                csvContent: Papa.unparse(finalExportData),
+                filename: `${cat.toLowerCase()}_full_${selectedMonth.toLowerCase()}.csv`
+            });
 
             // Eligible data (stipend > 0)
             const eligibleRows = exportData.filter(row => (row[stpHeader] || 0) > 0);
@@ -744,11 +851,15 @@ const EnrichmentPanel = ({ data, onUpdateData, onBack, onLogout }) => {
                 const eligibleTotalRow = { ...totalRow, [stpHeader]: totalEligibleStipend };
                 const eligibleExportData = [...eligibleExportDataRows, eligibleTotalRow];
 
-                downloadCSV(Papa.unparse(eligibleExportData), `${cat.toLowerCase()}_eligible_${selectedMonth.toLowerCase()}.csv`);
+                filesToDownload.push({
+                    csvContent: Papa.unparse(eligibleExportData),
+                    filename: `${cat.toLowerCase()}_eligible_${selectedMonth.toLowerCase()}.csv`
+                });
             }
         });
 
-        alert(`Generated ${selectedMonth} summary and category CSV files! Check your downloads folder.`);
+        downloadCSVBatch(filesToDownload);
+        alert(`Generated ${filesToDownload.length} ${selectedMonth} CSV file(s). Check your downloads folder.`);
     };
 
     return (
